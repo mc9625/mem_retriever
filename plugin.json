@@ -1,10 +1,10 @@
 {
     "name": "Declarative Memory API",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Plugin that exposes REST endpoints for direct access to Cat's declarative memory without using the LLM. Enables fast searches, advanced filters, and programmatic access to stored content.",
     "author_name": "NuvolaProject",
     "author_url": "https://nuvolaproject.cloud",
     "plugin_url": "https://github.com/mc9625/mem_retriever",
     "tags": "api, memory, search, endpoint, utility, performance",
-    "thumb": "https://raw.githubusercontent.com/your-repo/declarative-memory-api/main/logo.png"
+    "thumb": "https://raw.githubusercontent.com/mc9625/mem_retriever/main/mem_retriever.png"
 }
