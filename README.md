@@ -317,7 +317,7 @@ Contributions, issues, and feature requests are welcome!
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/your-repo/declarative-memory-api/issues)
+- **Issues**: [GitHub Issues](https://github.com/mc9625/mem_retriever/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/cheshire-cat-ai/core/discussions)
 - **Community**: [Discord Server](https://discord.gg/bHX5sNFCYU)
 
@@ -327,7 +327,7 @@ Contributions, issues, and feature requests are welcome!
 
 [![Cheshire Cat AI](https://img.shields.io/badge/Cheshire%20Cat%20AI-Plugin-purple)](https://github.com/cheshire-cat-ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/your-repo/declarative-memory-api)# 🧠 Declarative Memory API Plugin
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/mc9625/mem_retriever)# 🧠 Declarative Memory API Plugin
 
 Plugin per Cheshire Cat AI che espone endpoint REST per accedere direttamente alla memoria dichiarativa senza utilizzare l'LLM.
 
