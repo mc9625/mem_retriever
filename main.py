@@ -1,9 +1,9 @@
-# declarative_memory_api.py - ENGLISH VERSION
+# declarative_memory_api.py - ENGLISH VERSION - OPTIMIZED
 
 from cat.mad_hatter.decorators import plugin, endpoint
 from cat.auth.permissions import check_permissions, AuthResource, AuthPermission
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from cat.log import log
 import time
 import json
@@ -53,6 +53,12 @@ class DeclarativeMemorySettings(BaseModel):
         description="Number of characters for content preview",
         ge=50,
         le=1000
+    )
+    
+    use_search_method: bool = Field(
+        default=True,
+        title="Use high-level search method",
+        description="Use search() method when available (more efficient)",
     )
 
 @plugin
@@ -117,6 +123,7 @@ class MemorySearchResponse(BaseModel):
     search_time_ms: float = Field(description="Search time in milliseconds")
     parameters: Dict[str, Any] = Field(description="Parameters used for search")
     embedder_info: Dict[str, Any] = Field(description="Information about the embedder used")
+    search_method: str = Field(description="Search method used", default="unknown")
 
 @endpoint.get("/declarative-memory/search")
 def search_declarative_memory_get(
@@ -168,9 +175,74 @@ def search_declarative_memory_post(
     
     return _perform_memory_search(request, stray)
 
+def _try_search_method(collection, request: MemorySearchRequest, k: int, threshold: float) -> Tuple[Optional[List], str]:
+    """
+    Try to use the high-level search() method with various signatures.
+    
+    Returns:
+        Tuple of (results, method_name) or (None, error_message)
+    """
+    
+    # Method 1: search() with metadata filter support
+    if hasattr(collection, 'search'):
+        try:
+            # Try with filter parameter (some vector stores support this)
+            if request.metadata_filter:
+                try:
+                    results = collection.search(
+                        request.query,
+                        k=k,
+                        threshold=threshold,
+                        filter=request.metadata_filter
+                    )
+                    log.info("Used search() with native metadata filtering")
+                    return results, "search_with_filter"
+                except TypeError:
+                    # Filter parameter not supported, try without
+                    pass
+            
+            # Try basic search without filter
+            results = collection.search(
+                request.query,
+                k=k,
+                threshold=threshold
+            )
+            log.info("Used search() method (metadata filtering will be applied post-retrieval)")
+            return results, "search"
+            
+        except Exception as e:
+            log.debug(f"search() method failed: {e}")
+    
+    # Method 2: Try query() method (some implementations use this)
+    if hasattr(collection, 'query'):
+        try:
+            results = collection.query(
+                request.query,
+                k=k,
+                threshold=threshold
+            )
+            log.info("Used query() method")
+            return results, "query"
+        except Exception as e:
+            log.debug(f"query() method failed: {e}")
+    
+    # Method 3: Try similarity_search() (LangChain style)
+    if hasattr(collection, 'similarity_search'):
+        try:
+            results = collection.similarity_search(
+                request.query,
+                k=k
+            )
+            log.info("Used similarity_search() method")
+            return results, "similarity_search"
+        except Exception as e:
+            log.debug(f"similarity_search() method failed: {e}")
+    
+    return None, "no_high_level_method"
+
 def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchResponse:
     """
-    Performs declarative memory search using the correct API.
+    Performs declarative memory search using the most efficient available method.
     
     Args:
         request: Search parameters
@@ -181,6 +253,7 @@ def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchR
     """
     
     start_time = time.time()
+    search_method_used = "unknown"
     
     try:
         # Load plugin settings
@@ -198,41 +271,65 @@ def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchR
         # Log search request
         log.info(f"Searching declarative memory for user {stray.user_id}: '{request.query}' (k={k}, threshold={threshold})")
         
-        # STEP 1: Convert query to embedding using Cat's embedder
-        log.info("Converting query to embedding...")
-        query_embedding = stray.embedder.embed_query(request.query)
-        log.info(f"Query embedding generated, size: {len(query_embedding)}")
+        collection = stray.memory.vectors.declarative
+        memory_results = None
         
-        # STEP 2: Search declarative memory with correct API
-        log.info("Searching declarative memory with embedding...")
+        # Try high-level search methods first if enabled
+        if settings.get("use_search_method", True):
+            memory_results, search_method_used = _try_search_method(collection, request, k, threshold)
         
-        # Search parameters
-        search_params = {
-            "embedding": query_embedding,
-            "k": k,
-            "threshold": threshold
-        }
+        # Fallback to low-level embedding search
+        if memory_results is None:
+            log.info("Falling back to recall_memories_from_embedding method")
+            
+            # STEP 1: Convert query to embedding using Cat's embedder
+            log.debug("Converting query to embedding...")
+            query_embedding = stray.embedder.embed_query(request.query)
+            log.debug(f"Query embedding generated, size: {len(query_embedding)}")
+            
+            # STEP 2: Search declarative memory with embedding
+            log.debug("Searching declarative memory with embedding...")
+            
+            # Search parameters
+            search_params = {
+                "embedding": query_embedding,
+                "k": k,
+                "threshold": threshold
+            }
+            
+            # NOTE: metadata_filter is not directly supported by recall_memories_from_embedding
+            # but we can filter after retrieval
+            memory_results = stray.memory.vectors.declarative.recall_memories_from_embedding(**search_params)
+            search_method_used = "recall_memories_from_embedding"
         
-        # NOTE: metadata_filter is not directly supported by recall_memories_from_embedding
-        # but we can filter after retrieval
-        memory_results = stray.memory.vectors.declarative.recall_memories_from_embedding(**search_params)
-        
-        log.info(f"Found {len(memory_results) if memory_results else 0} results before filtering")
+        log.info(f"Found {len(memory_results) if memory_results else 0} results using {search_method_used}")
         
         # STEP 3: Process and filter results
         results = []
+        needs_post_filtering = (
+            request.metadata_filter and 
+            settings.get("enable_metadata_filter", True) and
+            search_method_used != "search_with_filter"  # Only post-filter if not already filtered
+        )
         
         if memory_results:
             for doc_with_score in memory_results:
                 try:
-                    # Format: (Document, score)
-                    doc = doc_with_score[0]
-                    score = doc_with_score[1] if len(doc_with_score) > 1 else None
+                    # Handle different result formats
+                    if isinstance(doc_with_score, tuple) and len(doc_with_score) >= 2:
+                        doc = doc_with_score[0]
+                        score = doc_with_score[1]
+                    elif hasattr(doc_with_score, 'document') and hasattr(doc_with_score, 'score'):
+                        # Some vector stores return objects
+                        doc = doc_with_score.document
+                        score = doc_with_score.score
+                    else:
+                        # Assume it's just the document
+                        doc = doc_with_score
+                        score = None
                     
-                    # Apply metadata filters if specified
-                    if (request.metadata_filter and 
-                        settings.get("enable_metadata_filter", True)):
-                        
+                    # Apply metadata filters if needed
+                    if needs_post_filtering:
                         doc_metadata = getattr(doc, 'metadata', {})
                         
                         # Check if document passes filters
@@ -254,10 +351,11 @@ def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchR
                         if not filter_passed:
                             continue
                     
-                    # Create content preview if enabled
-                    content = getattr(doc, 'page_content', str(doc))
-                    content_preview = None
+                    # Extract content
+                    content = getattr(doc, 'page_content', None) or getattr(doc, 'content', None) or str(doc)
                     
+                    # Create content preview if enabled
+                    content_preview = None
                     if settings.get("enable_content_preview", True):
                         preview_length = settings.get("preview_length", 200)
                         content_preview = (content[:preview_length] + "..." 
@@ -288,12 +386,26 @@ def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchR
         # Log final results
         log.info(f"Returning {len(results)} results after filtering in {search_time_ms:.2f}ms for user {stray.user_id}")
         
+        # Get embedding dimensions for response
+        embedding_dimensions = None
+        if search_method_used == "recall_memories_from_embedding":
+            # We already have the embedding from earlier
+            embedding_dimensions = len(query_embedding)
+        else:
+            # Try to get a sample embedding to determine dimensions
+            try:
+                sample_embedding = stray.embedder.embed_query("test")
+                embedding_dimensions = len(sample_embedding)
+            except:
+                embedding_dimensions = None
+        
         # Build response
         response = MemorySearchResponse(
             query=request.query,
             results=results,
             total_results=len(results),
             search_time_ms=search_time_ms,
+            search_method=search_method_used,
             parameters={
                 "k": k,
                 "threshold": threshold,
@@ -304,7 +416,7 @@ def _perform_memory_search(request: MemorySearchRequest, stray) -> MemorySearchR
             embedder_info={
                 "name": stray.memory.vectors.declarative.embedder_name,
                 "size": stray.memory.vectors.declarative.embedder_size,
-                "embedding_dimensions": len(query_embedding)
+                "embedding_dimensions": embedding_dimensions
             }
         )
         
@@ -359,6 +471,16 @@ def get_memory_stats(
             log.warning(f"Could not retrieve document count: {e}")
             stats["total_documents"] = "error_counting"
             stats["count_error"] = str(e)
+        
+        # Check available search methods
+        collection = stray.memory.vectors.declarative
+        available_methods = []
+        
+        for method in ['search', 'query', 'similarity_search', 'recall_memories_from_embedding']:
+            if hasattr(collection, method):
+                available_methods.append(method)
+        
+        stats["available_search_methods"] = available_methods
         
         log.info(f"Memory stats retrieved for user {stray.user_id}")
         
@@ -440,6 +562,6 @@ def health_check() -> Dict[str, str]:
     return {
         "status": "healthy",
         "service": "declarative-memory-api",
-        "version": "1.0.0",
+        "version": "1.1.0",  # Updated version
         "timestamp": str(time.time())
     }
